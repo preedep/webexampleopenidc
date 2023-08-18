@@ -3,7 +3,7 @@ use oauth2::basic::{BasicClient, BasicTokenResponse};
 use oauth2::reqwest::async_http_client;
 use oauth2::{
     AuthType, AuthUrl, AuthorizationCode, ClientId, ClientSecret, CsrfToken, PkceCodeChallenge,
-    PkceCodeVerifier, RedirectUrl, Scope, TokenUrl,
+    PkceCodeVerifier, RedirectUrl, Scope, TokenResponse, TokenUrl,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -11,11 +11,17 @@ use std::env;
 use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use warp::http::{HeaderMap, StatusCode, Uri};
+use warp::http::{header, HeaderMap, StatusCode, Uri};
 use warp::{Filter, Rejection, Reply};
+use warp::reject::Reject;
 
 static WEB_AAD_LOGOUT: &str =
     "https://login.microsoftonline.com/common/oauth2/v2.0/logout?post_logout_redirect_uri=";
+
+
+#[derive(Debug)]
+struct CallbackInvalid;
+impl Reject for CallbackInvalid {}
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 struct Configuration {
@@ -90,6 +96,18 @@ async fn get_logout(
     let result = Uri::from_str(sign_out_url.as_str());
     Ok(warp::redirect(result.unwrap()))
 }
+async fn get_profile(headers: HeaderMap, store: Store) -> Result<impl Reply, Rejection> {
+    debug!("Profile Page , Header > {:#?} \r\n", headers,);
+
+    let body = r#"
+    <body>
+    <h1>
+    Welcome
+    </h1>
+    </body>
+    ""#;
+    Ok(warp::reply::html(body))
+}
 async fn get_callback(
     params: HashMap<String, String>,
     headers: HeaderMap,
@@ -138,14 +156,22 @@ async fn get_callback(
                 Some(v) => {
                     let token_result = client
                         .exchange_code(AuthorizationCode::new(c.to_string()))
-                        //.set_pkce_verifier(*(v.clone_from(*v)))
+                        //.set_pkce_verifier(*v)
                         .add_extra_param("code_verifier", v.secret())
                         .request_async(async_http_client)
                         .await;
 
                     match token_result {
                         Ok(t) => {
-                            info!("{:#?}", t);
+                            info!("Basic Token Response : {:#?}", t);
+                            info!("Access token : {}", t.access_token().secret());
+                            let result = Uri::from_str("/profile");
+                            /*
+                            redirect
+                            */
+                            //headers.insert("ACCESS_TOKEN", t.access_token().secret().parse()?);
+                            return Ok(warp::redirect::redirect(result.unwrap()));
+
                         }
                         Err(e) => {
                             error!("Error {:#?}", e);
@@ -155,8 +181,7 @@ async fn get_callback(
             }
         }
     }
-
-    Ok(warp::reply::with_status("", StatusCode::OK))
+    Err(warp::reject::custom(CallbackInvalid))
 }
 async fn index(headers: HeaderMap, store: Store) -> Result<impl Reply, Rejection> {
     debug!("Index Page , Header > {:#?}", headers);
@@ -209,6 +234,22 @@ async fn index(headers: HeaderMap, store: Store) -> Result<impl Reply, Rejection
     Ok(warp::redirect(result.unwrap()))
     //Ok(warp::reply::with_status("",StatusCode::OK))
 }
+
+async fn return_error(r: Rejection) -> Result<impl Reply, Rejection> {
+    error!("Call return_error : {:#?}", r);
+
+    if let Some(_callback_invalid) = r.find::<CallbackInvalid>() {
+        Ok(warp::reply::with_status(
+            "UNAUTHORIZED",
+            StatusCode::UNAUTHORIZED,
+        ))
+    } else{
+        Ok(warp::reply::with_status(
+            "Route not found",
+            StatusCode::NOT_FOUND,
+        ))
+    }
+}
 #[tokio::main]
 async fn main() {
     pretty_env_logger::init();
@@ -236,6 +277,11 @@ async fn main() {
         .and(warp::header::headers_cloned())
         .and(store_filter.clone())
         .and_then(get_callback);
+    let profile_page = warp::path::path("profile")
+        .and(warp::path::end())
+        .and(warp::header::headers_cloned())
+        .and(store_filter.clone())
+        .and_then(get_profile);
     let logout_page = warp::path::path("logout")
         .and(warp::query::query::<HashMap<String, String>>())
         .and(warp::path::end())
@@ -243,6 +289,9 @@ async fn main() {
         .and(store_filter.clone())
         .and_then(get_logout);
 
-    let routes = index_page.or(callback_page).or(logout_page);
+    let routes = index_page
+        .or(callback_page)
+        .or(profile_page)
+        .or(logout_page).recover(return_error);
     warp::serve(routes).run(([0, 0, 0, 0], 8080)).await;
 }
