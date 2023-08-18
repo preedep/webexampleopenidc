@@ -4,3 +4,5 @@ run.sh.bkk
 /.idea/modules.xml
 /.idea/webexampleopenidc.iml
 /.idea/vcs.xml
+/.idea/git_toolbox_prj.xml
+/.idea/kubernetes-settings.xml
