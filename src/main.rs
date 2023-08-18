@@ -11,7 +11,7 @@ use std::env;
 use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use warp::http::{header, HeaderMap, StatusCode, Uri};
+use warp::http::{ HeaderMap, StatusCode, Uri};
 use warp::{Filter, Rejection, Reply};
 use warp::reject::Reject;
 
