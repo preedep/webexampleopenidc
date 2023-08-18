@@ -2,8 +2,8 @@ use log::{debug, error, info};
 use oauth2::basic::{BasicClient, BasicTokenResponse};
 use oauth2::reqwest::async_http_client;
 use oauth2::{
-    AuthUrl, AuthorizationCode, ClientId, ClientSecret, CsrfToken, PkceCodeChallenge, RedirectUrl,
-    Scope, TokenUrl,
+    AuthType, AuthUrl, AuthorizationCode, ClientId, ClientSecret, CsrfToken, PkceCodeChallenge,
+    PkceCodeVerifier, RedirectUrl, Scope, TokenUrl,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -47,6 +47,7 @@ impl Configuration {
 #[derive(Clone)]
 struct Store {
     grocery_list: Arc<RwLock<Configuration>>,
+    pkce_table: Arc<RwLock<HashMap<String, PkceCodeVerifier>>>,
 }
 
 impl Store {
@@ -57,6 +58,7 @@ impl Store {
         client_id: String,
         client_secret: String,
     ) -> Self {
+        let table: HashMap<String, PkceCodeVerifier> = HashMap::new();
         Store {
             grocery_list: Arc::new(RwLock::new(Configuration::new(
                 tenant_id,
@@ -65,6 +67,7 @@ impl Store {
                 client_id,
                 client_secret,
             ))),
+            pkce_table: Arc::new(RwLock::new(table)),
         }
     }
 }
@@ -123,25 +126,31 @@ async fn get_callback(
                     .unwrap(),
                 ),
             )
+            .set_auth_type(AuthType::RequestBody)
             .set_redirect_uri(RedirectUrl::new(conf.clone().redirect_uri).unwrap());
 
-            // Generate a PKCE challenge.
-            let (pkce_challenge, pkce_verifier) = PkceCodeChallenge::new_random_sha256();
+            //let (pkce_challenge, pkce_verifier) = PkceCodeChallenge::new_random_sha256();
+            let verifier = store.pkce_table.read().await;
 
-            let token_result = client
-                .exchange_code(AuthorizationCode::new(c.to_string()))
-                // Set the PKCE code verifier.
-                .add_extra_param("grant_type", "authorization_code")
-                .set_pkce_verifier(pkce_verifier)
-                .request_async(async_http_client)
-                .await;
+            let verifier = verifier.get(params.get("state").unwrap());
+            match verifier {
+                None => {}
+                Some(v) => {
+                    let token_result = client
+                        .exchange_code(AuthorizationCode::new(c.to_string()))
+                        //.set_pkce_verifier(*(v.clone_from(*v)))
+                        .add_extra_param("code_verifier", v.secret())
+                        .request_async(async_http_client)
+                        .await;
 
-            match token_result {
-                Ok(t) => {
-                    info!("{:#?}", t);
-                }
-                Err(e) => {
-                    error!("Error {:#?}", e);
+                    match token_result {
+                        Ok(t) => {
+                            info!("{:#?}", t);
+                        }
+                        Err(e) => {
+                            error!("Error {:#?}", e);
+                        }
+                    }
                 }
             }
         }
@@ -151,6 +160,10 @@ async fn get_callback(
 }
 async fn index(headers: HeaderMap, store: Store) -> Result<impl Reply, Rejection> {
     debug!("Index Page , Header > {:#?}", headers);
+
+    let (pkce_challenge, pkce_verifier) = PkceCodeChallenge::new_random_sha256();
+    debug!("PKCE : {:?},{:?}", pkce_challenge, pkce_verifier);
+
     let conf = store.grocery_list.read().await;
     let client = BasicClient::new(
         ClientId::new(conf.clone().client_id),
@@ -168,8 +181,6 @@ async fn index(headers: HeaderMap, store: Store) -> Result<impl Reply, Rejection
     // Set the URL the user will be redirected to after the authorization process.
     .set_redirect_uri(RedirectUrl::new(conf.clone().redirect_uri).unwrap());
 
-    let (pkce_challenge, _pkce_verifier) = PkceCodeChallenge::new_random_sha256();
-
     // Generate the full authorization URL.
     let (auth_url, csrf_token) = client
         .authorize_url(CsrfToken::new_random)
@@ -180,15 +191,23 @@ async fn index(headers: HeaderMap, store: Store) -> Result<impl Reply, Rejection
         .add_scope(Scope::new("User.Read".to_string()))
         // Set the PKCE code challenge.
         .set_pkce_challenge(pkce_challenge)
-        .add_extra_param("response_mode", "form_post")
+        .add_extra_param("response_mode", "query")
         //.add_extra_param("state","redir=./questions")
         .url();
+
+    debug!("csrf_token = {}", csrf_token.secret());
+    store
+        .pkce_table
+        .write()
+        .await
+        .insert(csrf_token.secret().to_string(), pkce_verifier);
 
     let auth_url = format!("{}", auth_url);
     debug!("Url : {}", auth_url.clone());
 
     let result = Uri::from_str(auth_url.as_str());
     Ok(warp::redirect(result.unwrap()))
+    //Ok(warp::reply::with_status("",StatusCode::OK))
 }
 #[tokio::main]
 async fn main() {
