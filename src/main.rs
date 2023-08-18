@@ -1,6 +1,10 @@
-use log::{debug, info};
-use oauth2::basic::BasicClient;
-use oauth2::{AuthUrl, ClientId, ClientSecret, CsrfToken, PkceCodeChallenge, RedirectUrl, Scope};
+use log::{debug, error, info};
+use oauth2::basic::{BasicClient, BasicTokenResponse};
+use oauth2::reqwest::async_http_client;
+use oauth2::{
+    AuthUrl, AuthorizationCode, ClientId, ClientSecret, CsrfToken, PkceCodeChallenge, RedirectUrl,
+    Scope, TokenUrl,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::env;
@@ -10,13 +14,12 @@ use tokio::sync::RwLock;
 use warp::http::{HeaderMap, StatusCode, Uri};
 use warp::{Filter, Rejection, Reply};
 
-
 static WEB_AAD_LOGOUT: &str =
     "https://login.microsoftonline.com/common/oauth2/v2.0/logout?post_logout_redirect_uri=";
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 struct Configuration {
-    tenant_id:String,
+    tenant_id: String,
     default_page: String,
     redirect_uri: String,
     client_id: String,
@@ -25,7 +28,7 @@ struct Configuration {
 
 impl Configuration {
     fn new(
-        tenant_id:String,
+        tenant_id: String,
         default_page: String,
         redirect_uri: String,
         client_id: String,
@@ -75,7 +78,11 @@ async fn get_logout(
         headers, params
     );
     let conf = store.grocery_list.read().await;
-    let sign_out_url = format!("{}{}", WEB_AAD_LOGOUT, urlencoding::encode(conf.clone().default_page.as_str()));
+    let sign_out_url = format!(
+        "{}{}",
+        WEB_AAD_LOGOUT,
+        urlencoding::encode(conf.clone().default_page.as_str())
+    );
     debug!("redirect to url > {}", sign_out_url);
     let result = Uri::from_str(sign_out_url.as_str());
     Ok(warp::redirect(result.unwrap()))
@@ -89,23 +96,77 @@ async fn get_callback(
         "Callback Page , Header > {:#?} \r\n Query string > {:#?}",
         headers, params
     );
+    match params.get("code") {
+        None => {}
+        Some(c) => {
+            let conf = store.grocery_list.read().await;
+
+            let client = BasicClient::new(
+                ClientId::new(conf.clone().client_id),
+                Some(ClientSecret::new(conf.clone().client_secret)),
+                AuthUrl::new(
+                    format!(
+                        "https://login.microsoftonline.com/{}/oauth2/v2.0/authorize",
+                        conf.clone().tenant_id
+                    )
+                    .to_string(),
+                )
+                .unwrap(),
+                Some(
+                    TokenUrl::new(
+                        format!(
+                            "https://login.microsoftonline.com/{}/oauth2/v2.0/token",
+                            conf.clone().tenant_id
+                        )
+                        .to_string(),
+                    )
+                    .unwrap(),
+                ),
+            )
+            .set_redirect_uri(RedirectUrl::new(conf.clone().redirect_uri).unwrap());
+
+            // Generate a PKCE challenge.
+            let (pkce_challenge, pkce_verifier) = PkceCodeChallenge::new_random_sha256();
+
+            let token_result = client
+                .exchange_code(AuthorizationCode::new(c.to_string()))
+                // Set the PKCE code verifier.
+                .add_extra_param("grant_type","authorization_code")
+                .set_pkce_verifier(pkce_verifier)
+                .request_async(async_http_client)
+                .await;
+
+            match token_result {
+                Ok(t) => {
+                    info!("{:#?}", t);
+                }
+                Err(e) => {
+                    error!("Error {:#?}", e);
+                }
+            }
+        }
+    }
 
     Ok(warp::reply::with_status("", StatusCode::OK))
 }
 async fn index(headers: HeaderMap, store: Store) -> Result<impl Reply, Rejection> {
     debug!("Index Page , Header > {:#?}", headers);
     let conf = store.grocery_list.read().await;
-    let client =
-        BasicClient::new(
-            ClientId::new(conf.clone().client_id),
-            Some(ClientSecret::new(conf.clone().client_secret)),
-            AuthUrl::new(
-                format!("https://login.microsoftonline.com/{}/oauth2/v2.0/authorize",conf.clone().tenant_id).to_string()
-            ).unwrap(),
-            None
+    let client = BasicClient::new(
+        ClientId::new(conf.clone().client_id),
+        Some(ClientSecret::new(conf.clone().client_secret)),
+        AuthUrl::new(
+            format!(
+                "https://login.microsoftonline.com/{}/oauth2/v2.0/authorize",
+                conf.clone().tenant_id
+            )
+            .to_string(),
         )
-            // Set the URL the user will be redirected to after the authorization process.
-            .set_redirect_uri(RedirectUrl::new(conf.clone().redirect_uri).unwrap());
+        .unwrap(),
+        None,
+    )
+    // Set the URL the user will be redirected to after the authorization process.
+    .set_redirect_uri(RedirectUrl::new(conf.clone().redirect_uri).unwrap());
 
     let (pkce_challenge, _pkce_verifier) = PkceCodeChallenge::new_random_sha256();
 
