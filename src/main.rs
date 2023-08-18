@@ -131,7 +131,7 @@ async fn get_callback(
             let token_result = client
                 .exchange_code(AuthorizationCode::new(c.to_string()))
                 // Set the PKCE code verifier.
-                .add_extra_param("grant_type","authorization_code")
+                .add_extra_param("grant_type", "authorization_code")
                 .set_pkce_verifier(pkce_verifier)
                 .request_async(async_http_client)
                 .await;
