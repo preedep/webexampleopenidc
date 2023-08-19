@@ -415,7 +415,7 @@ async fn get_callback(
                             let result = Uri::from_str("/profile");
                             // save access token to session
                             let shared_session = Arc::new(RwLock::new(session_with_store.session));
-                            let res = shared_session
+                            let _res = shared_session
                                 .write()
                                 .await
                                 .insert(SESSION_KEY_ACCESS_TOKEN, t)
