@@ -1,4 +1,3 @@
-use base64::engine::general_purpose;
 use base64::Engine;
 use log::{debug, error, info};
 use oauth2::basic::{BasicClient, BasicTokenResponse};
@@ -8,10 +7,9 @@ use oauth2::{
     PkceCodeVerifier, RedirectUrl, Scope, TokenResponse, TokenUrl,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{HashMap};
 use std::env;
-use std::fs::File;
-use std::io::{BufReader, Read};
+use std::io::{Read};
 use std::str::FromStr;
 use std::sync::Arc;
 use jsonwebtoken::{Algorithm, decode, DecodingKey, Validation};
@@ -34,10 +32,144 @@ impl Reject for CallbackInvalid {}
 struct AccessTokenInvalid;
 impl Reject for AccessTokenInvalid {}
 
-//
-//   Configuration object
-//
-//
+
+///
+///     JWT Payload
+///
+///
+#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JwtPayload {
+    pub aud: String,
+    pub iss: String,
+    pub iat: i64,
+    pub nbf: i64,
+    pub exp: i64,
+    pub acct: i64,
+    pub acr: String,
+    pub aio: String,
+    pub altsecid: String,
+    pub amr: Vec<String>,
+    #[serde(rename = "app_displayname")]
+    pub app_displayname: String,
+    pub appid: String,
+    pub appidacr: String,
+    pub email: String,
+    #[serde(rename = "family_name")]
+    pub family_name: String,
+    #[serde(rename = "given_name")]
+    pub given_name: String,
+    pub idp: String,
+    pub idtyp: String,
+    pub ipaddr: String,
+    pub name: String,
+    pub oid: String,
+    pub platf: String,
+    pub puid: String,
+    pub rh: String,
+    pub scp: String,
+    pub sub: String,
+    #[serde(rename = "tenant_region_scope")]
+    pub tenant_region_scope: String,
+    pub tid: String,
+    #[serde(rename = "unique_name")]
+    pub unique_name: String,
+    pub uti: String,
+    pub ver: String,
+    pub wids: Vec<String>,
+    #[serde(rename = "xms_st")]
+    pub xms_st: XmsSt,
+    #[serde(rename = "xms_tcdt")]
+    pub xms_tcdt: i64,
+}
+
+#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct XmsSt {
+    pub sub: String,
+}
+
+///
+/// Open ID Configuration
+///
+#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenIDConfiguration {
+    #[serde(rename = "token_endpoint")]
+    pub token_endpoint: String,
+    #[serde(rename = "token_endpoint_auth_methods_supported")]
+    pub token_endpoint_auth_methods_supported: Vec<String>,
+    #[serde(rename = "jwks_uri")]
+    pub jwks_uri: String,
+    #[serde(rename = "response_modes_supported")]
+    pub response_modes_supported: Vec<String>,
+    #[serde(rename = "subject_types_supported")]
+    pub subject_types_supported: Vec<String>,
+    #[serde(rename = "id_token_signing_alg_values_supported")]
+    pub id_token_signing_alg_values_supported: Vec<String>,
+    #[serde(rename = "response_types_supported")]
+    pub response_types_supported: Vec<String>,
+    #[serde(rename = "scopes_supported")]
+    pub scopes_supported: Vec<String>,
+    pub issuer: String,
+    #[serde(rename = "microsoft_multi_refresh_token")]
+    pub microsoft_multi_refresh_token: bool,
+    #[serde(rename = "authorization_endpoint")]
+    pub authorization_endpoint: String,
+    #[serde(rename = "device_authorization_endpoint")]
+    pub device_authorization_endpoint: String,
+    #[serde(rename = "http_logout_supported")]
+    pub http_logout_supported: bool,
+    #[serde(rename = "frontchannel_logout_supported")]
+    pub frontchannel_logout_supported: bool,
+    #[serde(rename = "end_session_endpoint")]
+    pub end_session_endpoint: String,
+    #[serde(rename = "claims_supported")]
+    pub claims_supported: Vec<String>,
+    #[serde(rename = "check_session_iframe")]
+    pub check_session_iframe: String,
+    #[serde(rename = "userinfo_endpoint")]
+    pub userinfo_endpoint: String,
+    #[serde(rename = "kerberos_endpoint")]
+    pub kerberos_endpoint: String,
+    #[serde(rename = "tenant_region_scope")]
+    pub tenant_region_scope: String,
+    #[serde(rename = "cloud_instance_name")]
+    pub cloud_instance_name: String,
+    #[serde(rename = "cloud_graph_host_name")]
+    pub cloud_graph_host_name: String,
+    #[serde(rename = "msgraph_host")]
+    pub msgraph_host: String,
+    #[serde(rename = "rbac_url")]
+    pub rbac_url: String,
+}
+
+///
+///    JWKSUrlInf
+///
+#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JWKS {
+    pub keys: Vec<Key>,
+}
+#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Key {
+    pub kty: String,
+    #[serde(rename = "use")]
+    pub use_field: String,
+    pub kid: String,
+    pub x5t: String,
+    pub n: String,
+    pub e: String,
+    pub x5c: Vec<String>,
+}
+
+
+///
+///   Configuration object
+///
+///
 #[derive(Debug, Deserialize, Serialize, Clone)]
 struct Configuration {
     tenant_id: String,
@@ -126,10 +258,12 @@ async fn get_logout(
 async fn get_profile(
     session_with_store: SessionWithStore<MemoryStore>,
     headers: HeaderMap,
-    _store: Store,
+    store: Store,
 ) -> Result<impl Reply, Rejection> {
     debug!("Profile Page , Header > {:#?} \r\n", headers,);
     debug!("Session > {:#?}", session_with_store.session);
+
+    let conf = store.grocery_list.read().await;
 
     let token = session_with_store
         .session
@@ -143,12 +277,56 @@ async fn get_profile(
         Some(t) => {
             debug!("have access token : {}", t.access_token().secret());
 
+            let key = DecodingKey::from_secret(&[]);
+            let mut validation = Validation::new(Algorithm::HS256);
+            validation.insecure_disable_signature_validation();
+
+            let data  = decode::<JwtPayload>(t.access_token().secret(), &key, &validation);
+            match data {
+                Ok(payload) => {
+                    info!("jwt : {:#?}",&payload);
+                    //  check tenant id
+                    if payload.to_owned().claims.tid.eq(conf.to_owned().tenant_id.as_str()) {
+                        let url_openid_config =
+                            format!("https://login.microsoftonline.com/{}/.well-known/openid-configuration?appid={}",
+                                    payload.to_owned().claims.tid,
+                            payload.to_owned().claims.appid);
+                        info!("url validation : {}",url_openid_config);
+
+                        //let resp = reqwest::get(url_openid_config).unwrap().json::<OpenIDConfiguration>();
+                        let t = reqwest::get(url_openid_config).await.unwrap().json::<OpenIDConfiguration>().await;
+                        match t {
+                            Ok(o) => {
+                                debug!("Open ID Configuration : {:#?}",o);
+                                let jwks = reqwest::get(o.jwks_uri).await.unwrap().json::<JWKS>().await;
+                                match jwks {
+                                    Ok(j) => {
+                                        debug!("JWKS : {:#?}",j);
+                                    }
+                                    Err(e) => {
+                                        error!("Get JWKS URL error : {}",e);
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                error!("Get open id config error {}",e);
+                            }
+                        }
+                    }else{
+                        error!("TenantID incorrect");
+                    }
+                }
+                Err(e) => {
+                    error!("Decode without validation  > {}",e);
+                }
+            }
+            /*
             let f = File::open("./key.pem").unwrap();
             let mut reader = BufReader::new(f);
             let mut buffer = Vec::new();
             // Read file into vector.
             reader.read_to_end(&mut buffer).unwrap();
-            let token = decode::<BTreeMap<String,String>>(t.access_token().secret(),
+            let token = decode::<JwtPayload>(t.access_token().secret(),
                                                           &DecodingKey::from_rsa_pem(buffer.as_slice()).unwrap(),
                                                           &Validation::new(Algorithm::RS256));
             match token {
@@ -159,7 +337,7 @@ async fn get_profile(
                     error!("Decode jwt error {}",e);
                 }
             }
-
+            */
 
             let body = r#"
     <body>
