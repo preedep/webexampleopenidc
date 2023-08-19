@@ -11,13 +11,15 @@ use std::env;
 use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use warp::http::{ HeaderMap, StatusCode, Uri};
-use warp::{Filter, Rejection, Reply};
+use warp::http::{HeaderMap, StatusCode, Uri};
 use warp::reject::Reject;
+use warp::{Filter, Rejection, Reply};
+use warp_sessions::{CookieOptions, MemoryStore, SessionWithStore};
 
 static WEB_AAD_LOGOUT: &str =
     "https://login.microsoftonline.com/common/oauth2/v2.0/logout?post_logout_redirect_uri=";
 
+static SESSION_KEY_ACCESS_TOKEN: &str = "access_token";
 
 #[derive(Debug)]
 struct CallbackInvalid;
@@ -77,6 +79,10 @@ impl Store {
         }
     }
 }
+//
+//  get_logout
+//
+//
 async fn get_logout(
     params: HashMap<String, String>,
     headers: HeaderMap,
@@ -96,8 +102,25 @@ async fn get_logout(
     let result = Uri::from_str(sign_out_url.as_str());
     Ok(warp::redirect(result.unwrap()))
 }
-async fn get_profile(headers: HeaderMap, store: Store) -> Result<impl Reply, Rejection> {
+//
+//  get_profile
+//
+//
+async fn get_profile( session_with_store: SessionWithStore<MemoryStore>,
+                      headers: HeaderMap,
+                      store: Store) -> Result<impl Reply, Rejection> {
     debug!("Profile Page , Header > {:#?} \r\n", headers,);
+    debug!("Session > {:#?}",session_with_store.session);
+
+    let token = session_with_store.session.get::<BasicTokenResponse>(SESSION_KEY_ACCESS_TOKEN);
+    match token {
+        None => {
+            debug!("no access token");
+        }
+        Some(t) => {
+            debug!("have access token : {}",t.access_token().secret());
+        }
+    }
 
     let body = r#"
     <body>
@@ -108,8 +131,13 @@ async fn get_profile(headers: HeaderMap, store: Store) -> Result<impl Reply, Rej
     ""#;
     Ok(warp::reply::html(body))
 }
+//
+//  get_callback
+//
+//
 async fn get_callback(
     params: HashMap<String, String>,
+    mut session_with_store: SessionWithStore<MemoryStore>,
     headers: HeaderMap,
     store: Store,
 ) -> Result<impl Reply, Rejection> {
@@ -169,9 +197,20 @@ async fn get_callback(
                             /*
                             redirect
                             */
-                            //headers.insert("ACCESS_TOKEN", t.access_token().secret().parse()?);
-                            return Ok(warp::redirect::redirect(result.unwrap()));
+                            let res = session_with_store
+                                .session
+                                .insert(SESSION_KEY_ACCESS_TOKEN, t);
+                            match res {
+                                Ok(_) => {
+                                    info!("save access token to session");
 
+                                    debug!("Session > {:#?}",session_with_store.session);
+                                }
+                                Err(e) => {
+                                    error!("save access token error : {}", e);
+                                }
+                            }
+                            return Ok(warp::redirect::redirect(result.unwrap()));
                         }
                         Err(e) => {
                             error!("Error {:#?}", e);
@@ -183,6 +222,10 @@ async fn get_callback(
     }
     Err(warp::reject::custom(CallbackInvalid))
 }
+//
+//  index , main page
+//
+//
 async fn index(headers: HeaderMap, store: Store) -> Result<impl Reply, Rejection> {
     debug!("Index Page , Header > {:#?}", headers);
 
@@ -234,26 +277,44 @@ async fn index(headers: HeaderMap, store: Store) -> Result<impl Reply, Rejection
     Ok(warp::redirect(result.unwrap()))
     //Ok(warp::reply::with_status("",StatusCode::OK))
 }
-
+//
+//  return_error
+//
+//
 async fn return_error(r: Rejection) -> Result<impl Reply, Rejection> {
     error!("Call return_error : {:#?}", r);
-
     if let Some(_callback_invalid) = r.find::<CallbackInvalid>() {
         Ok(warp::reply::with_status(
             "UNAUTHORIZED",
             StatusCode::UNAUTHORIZED,
         ))
-    } else{
+    } else {
         Ok(warp::reply::with_status(
             "Route not found",
             StatusCode::NOT_FOUND,
         ))
     }
 }
+//
+//  main
+//
+//
 #[tokio::main]
 async fn main() {
     pretty_env_logger::init();
     info!("Web example 003 starting..");
+
+    let session_store = MemoryStore::new();
+    let cookie_option = CookieOptions {
+        cookie_name: "app_cookie",
+        cookie_value: None,
+        max_age: Some(600),
+        domain: None,
+        path: None,
+        secure: true,
+        http_only: true,
+        same_site: None,
+    };
 
     let store = Store::new(
         env::var("TENANT_ID").unwrap(),
@@ -271,17 +332,31 @@ async fn main() {
         .and(warp::header::headers_cloned())
         .and(store_filter.clone())
         .and_then(index);
+
+
     let callback_page = warp::path::path("callback")
         .and(warp::query::query::<HashMap<String, String>>())
+        .and(warp_sessions::request::with_session(
+            session_store.clone(),
+            Some(cookie_option.clone()),
+        ))
         .and(warp::path::end())
         .and(warp::header::headers_cloned())
         .and(store_filter.clone())
         .and_then(get_callback);
+
+
     let profile_page = warp::path::path("profile")
         .and(warp::path::end())
+        .and(warp_sessions::request::with_session(
+            session_store.clone(),
+            Some(cookie_option.clone()),
+        ))
         .and(warp::header::headers_cloned())
         .and(store_filter.clone())
         .and_then(get_profile);
+
+
     let logout_page = warp::path::path("logout")
         .and(warp::query::query::<HashMap<String, String>>())
         .and(warp::path::end())
@@ -289,9 +364,11 @@ async fn main() {
         .and(store_filter.clone())
         .and_then(get_logout);
 
+
     let routes = index_page
         .or(callback_page)
         .or(profile_page)
-        .or(logout_page).recover(return_error);
+        .or(logout_page)
+        .recover(return_error);
     warp::serve(routes).run(([0, 0, 0, 0], 8080)).await;
 }
