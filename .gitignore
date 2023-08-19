@@ -6,3 +6,6 @@ run.sh.bkk
 /.idea/vcs.xml
 /.idea/git_toolbox_prj.xml
 /.idea/kubernetes-settings.xml
+certificate.pem
+key.pem
+
