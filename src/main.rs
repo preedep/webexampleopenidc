@@ -302,6 +302,15 @@ async fn get_profile(
                                 match jwks {
                                     Ok(j) => {
                                         debug!("JWKS : {:#?}",j);
+                                        /*
+                                        var issuer = metadata["kid"].issuer;
+                                        if (issuer.contains("{tenantId}", CaseInvariant)) issuer = issuer.Replace("{tenantid}", token["tid"], CaseInvariant);
+                                        if (issuer != token["iss"]) throw validationException;
+                                        if (configuration.allowedIssuer != "*" && configuration.allowedIssuer != issuer) throw validationException;
+                                        var issUri = new Uri(token["iss"]);
+                                        if (issUri.Segments.Count < 1) throw validationException;
+                                        if (issUri.Segments[1] != token["tid"]) throw validationException;
+                                        */
                                     }
                                     Err(e) => {
                                         error!("Get JWKS URL error : {}",e);
@@ -394,7 +403,6 @@ async fn get_callback(
             )
             .set_auth_type(AuthType::RequestBody)
             .set_redirect_uri(RedirectUrl::new(conf.clone().redirect_uri).unwrap());
-            //let (pkce_challenge, pkce_verifier) = PkceCodeChallenge::new_random_sha256();
             let verifier = store.pkce_table.read().await;
 
             let verifier = verifier.get(params.get("state").unwrap());
@@ -403,7 +411,6 @@ async fn get_callback(
                 Some(v) => {
                     let token_result = client
                         .exchange_code(AuthorizationCode::new(c.to_string()))
-                        //.set_pkce_verifier(*v)
                         .add_extra_param("code_verifier", v.secret())
                         .request_async(async_http_client)
                         .await;
