@@ -3,16 +3,18 @@ use log::{debug, error, info};
 use oauth2::basic::{BasicClient, BasicTokenResponse};
 use oauth2::reqwest::async_http_client;
 use oauth2::{
-     AuthUrl, AuthorizationCode, ClientId, ClientSecret, CsrfToken, PkceCodeChallenge,
-    PkceCodeVerifier, RedirectUrl, Scope, TokenResponse, TokenUrl,
+    AuthUrl, AuthorizationCode, ClientId, ClientSecret, CsrfToken, PkceCodeChallenge,
+    PkceCodeVerifier, RedirectUrl, ResponseType, Scope, TokenResponse, TokenUrl,
 };
+use reqwest::{Error, Response};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::collections::HashMap;
 use std::env;
 use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use warp::http::{HeaderMap, StatusCode, Uri};
+use warp::http::{HeaderMap, HeaderValue, StatusCode, Uri};
 use warp::reject::Reject;
 use warp::{Filter, Rejection, Reply};
 use warp_sessions::{MemoryStore, SessionWithStore};
@@ -22,10 +24,6 @@ static WEB_AAD_URL: &str = "https://login.microsoftonline.com/";
 static WEB_AAD_AUTH: &str = "/oauth2/v2.0/authorize";
 static WEB_AAD_TOKEN: &str = "/oauth2/v2.0/token";
 static WEB_AAD_LOGOUT: &str = "/oauth2/v2.0/logout";
-
-
-
-
 
 static SESSION_KEY_ACCESS_TOKEN: &str = "access_token";
 
@@ -92,6 +90,57 @@ pub struct JwtPayload {
 pub struct XmsSt {
     pub sub: String,
 }
+
+///
+/// JWT Payload for ID Token
+///
+
+#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JwtPayloadIDToken {
+    pub aud: String,
+    pub iss: String,
+    pub iat: i64,
+    pub nbf: i64,
+    pub exp: i64,
+    pub acct: i64,
+    pub acrs: Vec<String>,
+    pub aio: String,
+    #[serde(rename = "auth_time")]
+    pub auth_time: i64,
+    pub ctry: String,
+    pub email: String,
+    #[serde(rename = "family_name")]
+    pub family_name: String,
+    #[serde(rename = "given_name")]
+    pub given_name: String,
+    pub idp: String,
+    pub ipaddr: String,
+    #[serde(rename = "login_hint")]
+    pub login_hint: String,
+    pub name: String,
+    pub nonce: String,
+    pub oid: String,
+    #[serde(rename = "preferred_username")]
+    pub preferred_username: String,
+    pub rh: String,
+    pub sid: String,
+    pub sub: String,
+    #[serde(rename = "tenant_ctry")]
+    pub tenant_ctry: String,
+    #[serde(rename = "tenant_region_scope")]
+    pub tenant_region_scope: String,
+    pub tid: String,
+    pub uti: String,
+    pub ver: String,
+    #[serde(rename = "xms_pl")]
+    pub xms_pl: String,
+    #[serde(rename = "xms_tpl")]
+    pub xms_tpl: String,
+    pub department: String,
+    pub companyname: String,
+}
+
 
 ///
 /// Open ID Configuration
@@ -229,14 +278,22 @@ impl Store {
         }
     }
 }
-fn get_aad_url(aad_host: String,ten_nant_id: String,oauth2_path: String) -> String {
-    let url = format!("{}{}{}",aad_host,ten_nant_id,oauth2_path);
-    info!("Called aad url > {}",url.to_owned());
+//
+// create azure ad url
+//
+fn get_aad_url(aad_host: String, ten_nant_id: String, oauth2_path: String) -> String {
+    let url = format!("{}{}{}", aad_host, ten_nant_id, oauth2_path);
+    info!("Called aad url > {}", url.to_owned());
     url
 }
 //
-//  get_logout
+//  no cache
 //
+fn disable_cache(reply: impl Reply) -> impl Reply {
+    warp::reply::with_header(reply, "cache_control", HeaderValue::from_static("no-cache"))
+}
+//
+//  get_logout
 //
 async fn get_logout(
     params: HashMap<String, String>,
@@ -253,12 +310,12 @@ async fn get_logout(
         session_with_store.to_owned().session.destroy();
     }
 
-
-
     let conf = store.grocery_list.read().await;
-    let aad_logout = get_aad_url(WEB_AAD_URL.to_string(),
-    conf.to_owned().tenant_id,
-    WEB_AAD_LOGOUT.to_string());
+    let aad_logout = get_aad_url(
+        WEB_AAD_URL.to_string(),
+        conf.to_owned().tenant_id,
+        WEB_AAD_LOGOUT.to_string(),
+    );
 
     let sign_out_url = format!(
         "{}?post_logout_redirect_uri={}",
@@ -274,111 +331,181 @@ async fn get_logout(
 //
 //
 async fn get_profile(
+    querys: HashMap<String, String>,
     session_with_store: SessionWithStore<MemoryStore>,
     headers: HeaderMap,
     store: Store,
 ) -> Result<impl Reply, Rejection> {
     debug!("Profile Page , Header > {:#?} \r\n", headers,);
     debug!("Session > {:#?}", session_with_store.session);
-
+    let mut text_display = String::new();
     let conf = store.grocery_list.read().await;
-
     let token = session_with_store
         .session
-        .get::<BasicTokenResponse>(SESSION_KEY_ACCESS_TOKEN);
+        .get::<String>(SESSION_KEY_ACCESS_TOKEN);
     match token {
         None => {
             debug!("no access token");
             Err(warp::reject::custom(AccessTokenInvalid))
         }
-
         Some(t) => {
-            debug!("have access token : {}", t.access_token().secret());
-
+            let access_token = t;
+            debug!("have access token : {}", access_token);
             let key = DecodingKey::from_secret(&[]);
             let mut validation = Validation::new(Algorithm::HS256);
             validation.insecure_disable_signature_validation();
-
-            let data = decode::<JwtPayload>(t.access_token().secret(), &key, &validation);
-            match data {
-                Ok(payload) => {
-                    info!("jwt : {:#?}", &payload);
-                    let url_openid_config =
-                            format!("https://login.microsoftonline.com/{}/v2.0/.well-known/openid-configuration?appid={}",
-                                    payload.to_owned().claims.tid,
-                            payload.to_owned().claims.appid);
-                    info!("url validation : {}", url_openid_config);
-                    /*
-                    var issuer = metadata["kid"].issuer;
-                    if (issuer.contains("{tenantId}", CaseInvariant)) issuer = issuer.Replace("{tenantid}", token["tid"], CaseInvariant);
-                    if (issuer != token["iss"]) throw validationException;
-                    if (configuration.allowedIssuer != "*" && configuration.allowedIssuer != issuer) throw validationException;
-                    var issUri = new Uri(token["iss"]);
-                    if (issUri.Segments.Count < 1) throw validationException;
-                    if (issUri.Segments[1] != token["tid"]) throw validationException;
-                    */
-                    //let resp = reqwest::get(url_openid_config).unwrap().json::<OpenIDConfiguration>();
-                    let t = reqwest::get(url_openid_config)
-                        .await
-                        .unwrap()
-                        .json::<OpenIDConfigurationV2>()
-                        .await;
-                    match t {
-                        Ok(o) => {
-                            debug!("Open ID Configuration : {:#?}", o);
-                            // verify issuer
-                            if o.to_owned()
-                                .issuer
-                                .as_str()
-                                .contains(conf.to_owned().tenant_id.as_str())
-                            {
-                                info!("Issuer is collect");
-
-                                info!("Issuer from OpenID Configuration {} ,\r\n Issuer from JWT Payload {}",o.to_owned()
+            let response_type = querys.get("response_type");
+            if let Some(res) = response_type {
+                if res.eq("code") {
+                    // code
+                    let data = decode::<JwtPayload>(access_token.as_str(), &key, &validation);
+                    match data {
+                        Ok(payload) => {
+                            info!("jwt : {:#?}", &payload);
+                            let url_openid_config =
+                                format!("https://login.microsoftonline.com/{}/v2.0/.well-known/openid-configuration?appid={}",
+                                        payload.to_owned().claims.tid,
+                                        payload.to_owned().claims.appid);
+                            info!("url validation : {}", url_openid_config);
+                            let t = reqwest::get(url_openid_config)
+                                .await
+                                .unwrap()
+                                .json::<OpenIDConfigurationV2>()
+                                .await;
+                            match t {
+                                Ok(o) => {
+                                    debug!("Open ID Configuration : {:#?}", o);
+                                    // verify issuer
+                                    if o.to_owned()
+                                        .issuer
+                                        .as_str()
+                                        .contains(conf.to_owned().tenant_id.as_str())
+                                    {
+                                        info!("Issuer is collect");
+                                        info!("Issuer from OpenID Configuration {} ,\r\n Issuer from JWT Payload {}",o.to_owned()
                                     .issuer,payload.to_owned().claims.iss);
 
-                                let jwks = reqwest::get(o.jwks_uri).await.unwrap().json::<JWKS>().await;
-                                match jwks {
-                                    Ok(j) => {
-                                        debug!("JWKS : {:#?}", j);
-                                    }
-                                    Err(e) => {
-                                        error!("Get JWKS URL error : {}", e);
+                                        let jwks = reqwest::get(o.to_owned().jwks_uri)
+                                            .await
+                                            .unwrap()
+                                            .json::<JWKS>()
+                                            .await;
+                                        match jwks {
+                                            Ok(j) => {
+                                                debug!("JWKS : {:#?}", j);
+                                            }
+                                            Err(e) => {
+                                                error!("Get JWKS URL error : {}", e);
+                                            }
+                                        }
+                                        let client = reqwest::Client::new();
+                                        let res_user_info = client
+                                            .get(o.to_owned().userinfo_endpoint)
+                                            .header(
+                                                "Authorization",
+                                                format!("Bearer {}", access_token),
+                                            )
+                                            .send()
+                                            .await;
+                                        match res_user_info {
+                                            Ok(r) => {
+                                                debug!("Get user info : {:#?}", r);
+                                            }
+                                            Err(e) => {
+                                                error!("Get user info err : {}", e);
+                                            }
+                                        }
+                                    } else {
+                                        error!("Issuer is not collect");
                                     }
                                 }
-
-                                /*
-                                if o.to_owned()
-                                    .issuer
-                                    .eq(payload.to_owned().claims.iss.as_str())
-                                {
-                                    info!("Issuer same token[iss]   {}",payload.to_owned().claims.iss);
-                                }*/
-                            } else {
-                                error!("Issuer is not collect");
+                                Err(e) => {
+                                    error!("Get open id config error {}", e);
+                                }
                             }
                         }
                         Err(e) => {
-                            error!("Get open id config error {}", e);
+                            error!("Decode without validation  > {}", e);
+                        }
+                    }
+                } else {
+                    // ID Token
+                    let data = decode::<JwtPayloadIDToken>(access_token.as_str(), &key, &validation);
+                    match data {
+                        Ok(payload) => {
+                            text_display.push_str(
+                                format!(r#"Name : {}-{}
+                                <br/>
+                                Department : {}
+                                <br/>
+                                Company : {}
+                                <br/>
+                                "#,
+                                payload.claims.given_name,
+                                payload.claims.family_name,
+                                payload.claims.department,
+                                payload.claims.companyname).as_str()
+                            );
+                        }
+                        Err(e) => {
+                            error!("Decode without validation  > {}", e);
                         }
                     }
                 }
-                Err(e) => {
-                    error!("Decode without validation  > {}", e);
-                }
             }
-            let body = r#"
+            let body = format!(r#"
     <body>
     <h1>
-    Welcome
+    Welcome <br/> {}
     </h1>
     </body>
-    "#;
+    "#,text_display);
 
             Ok(warp::reply::html(body))
         }
     }
 }
+
+//
+//  callback
+//  for response_type = token_id (openidc)
+//
+async fn post_callback_token_id(
+    forms: HashMap<String, String>,
+    mut session_with_store: SessionWithStore<MemoryStore>,
+    headers: HeaderMap,
+    store: Store,
+) -> Result<impl Reply, Rejection> {
+    debug!("Callback page , Header > {:#?}", headers);
+    debug!("Form value : {:#?}", forms);
+
+    return match forms.get("id_token") {
+        None => Err(warp::reject::custom(AccessTokenInvalid)),
+        Some(token) => {
+            let result = Uri::from_str("/profile?response_type=id_token");
+            // save access token to session
+            let shared_session = Arc::new(RwLock::new(session_with_store.session));
+            let _res = shared_session
+                .write()
+                .await
+                .insert(SESSION_KEY_ACCESS_TOKEN, token)
+                .unwrap();
+
+            session_with_store.session = Arc::try_unwrap(shared_session).unwrap().into_inner();
+            debug!("Session > {:#?}", session_with_store.session);
+
+            //redirect
+            let res = warp_sessions::reply::with_session(
+                warp::redirect::redirect(result.unwrap()),
+                session_with_store,
+            )
+            .await;
+            Ok(res.unwrap())
+        }
+    };
+    //Ok(warp::reply::with_status("",StatusCode::OK))
+}
+
 //
 //  get_callback
 //
@@ -401,21 +528,18 @@ async fn get_callback(
             let client = BasicClient::new(
                 ClientId::new(conf.clone().client_id),
                 Some(ClientSecret::new(conf.clone().client_secret)),
-                AuthUrl::new(
-                    get_aad_url(WEB_AAD_URL.to_string(),
+                AuthUrl::new(get_aad_url(
+                    WEB_AAD_URL.to_string(),
                     conf.to_owned().tenant_id,
-                        WEB_AAD_AUTH.to_string(),
-                    ),
-                )
+                    WEB_AAD_AUTH.to_string(),
+                ))
                 .unwrap(),
                 Some(
-                    TokenUrl::new(
-                        get_aad_url(WEB_AAD_URL.to_string(),
-                                    conf.to_owned().tenant_id,
-                                    WEB_AAD_TOKEN.to_string(),
-                        )
-                        ,
-                    )
+                    TokenUrl::new(get_aad_url(
+                        WEB_AAD_URL.to_string(),
+                        conf.to_owned().tenant_id,
+                        WEB_AAD_TOKEN.to_string(),
+                    ))
                     .unwrap(),
                 ),
             )
@@ -436,13 +560,13 @@ async fn get_callback(
                         Ok(t) => {
                             info!("Basic Token Response : {:#?}", t);
                             info!("Access token : {}", t.access_token().secret());
-                            let result = Uri::from_str("/profile");
+                            let result = Uri::from_str("/profile?response_type=code");
                             // save access token to session
                             let shared_session = Arc::new(RwLock::new(session_with_store.session));
                             let _res = shared_session
                                 .write()
                                 .await
-                                .insert(SESSION_KEY_ACCESS_TOKEN, t)
+                                .insert(SESSION_KEY_ACCESS_TOKEN, t.access_token().secret())
                                 .unwrap();
 
                             session_with_store.session =
@@ -468,27 +592,34 @@ async fn get_callback(
     }
 }
 
-
 //
 //  index , main page
 //
 //
-async fn index(headers: HeaderMap, store: Store) -> Result<impl Reply, Rejection> {
+async fn index(headers: HeaderMap, _store: Store) -> Result<impl Reply, Rejection> {
     debug!("Index Page , Header > {:#?}", headers);
     let body = r#"
         <html>
             <body>
-                <a href="/login">Login with Azure AD</a>
+                <a href="/login?response_type=code">Login with Azure AD (Auth Code )</a><br/>
+                  <a href="/login?response_type=id_token">Login with Azure AD (ID Token - OpenIDC)</a><br/>
                 <a href="/logout">Logout</a>
             </body>
     </html>
     "#;
-    Ok(warp::reply::html(body))
+    let reply = warp::reply::html(body);
+    Ok(disable_cache(reply))
 }
+
 //
 //  login page
+//  for response_type = code
 //
-async fn get_login(headers: HeaderMap, store: Store) -> Result<impl Reply, Rejection> {
+async fn get_login(
+    querys: HashMap<String, String>,
+    headers: HeaderMap,
+    store: Store,
+) -> Result<impl Reply, Rejection> {
     debug!("Login page , Header > {:#?}", headers);
 
     let (pkce_challenge, pkce_verifier) = PkceCodeChallenge::new_random_sha256();
@@ -498,19 +629,20 @@ async fn get_login(headers: HeaderMap, store: Store) -> Result<impl Reply, Rejec
     let client = BasicClient::new(
         ClientId::new(conf.clone().client_id),
         Some(ClientSecret::new(conf.to_owned().client_secret)),
-        AuthUrl::new(
-            get_aad_url(WEB_AAD_URL.to_string(),
-                conf.to_owned().tenant_id,
-                WEB_AAD_AUTH.to_string(),
-            ),
-        )
+        AuthUrl::new(get_aad_url(
+            WEB_AAD_URL.to_string(),
+            conf.to_owned().tenant_id,
+            WEB_AAD_AUTH.to_string(),
+        ))
         .unwrap(),
         None,
     )
     // Set the URL the user will be redirected to after the authorization process.
     .set_redirect_uri(RedirectUrl::new(conf.clone().redirect_uri).unwrap());
+    //response-type = id_token is openid scenario
 
     // Generate the full authorization URL.
+    /*
     let (auth_url, csrf_token) = client
         .authorize_url(CsrfToken::new_random)
         // Set the desired scopes.
@@ -518,11 +650,35 @@ async fn get_login(headers: HeaderMap, store: Store) -> Result<impl Reply, Rejec
         .add_scope(Scope::new("profile".to_string()))
         .add_scope(Scope::new("email".to_string()))
         .add_scope(Scope::new("User.Read".to_string()))
-        // Set the PKCE code challenge.
         .set_pkce_challenge(pkce_challenge)
-        .add_extra_param("response_mode", "query")
-        //.add_extra_param("state","redir=./questions")
+        .add_extra_param("response_mode", response_mode)
+        .add_extra_param("nonce","1234234233232322222")
+        .set_response_type(&response_type)
         .url();
+
+     */
+
+    let mut auth_req = client
+        .authorize_url(CsrfToken::new_random)
+        // Set the desired scopes.
+        .add_scope(Scope::new("openid".to_string()))
+        .add_scope(Scope::new("profile".to_string()))
+        .add_scope(Scope::new("email".to_string()))
+        .add_scope(Scope::new("User.Read".to_string()))
+        .set_pkce_challenge(pkce_challenge);
+
+    let mut response_type = ResponseType::new("code".to_string());
+    let mut response_mode = "query";
+    if let Some(t) = querys.get("response_type") {
+        response_type = ResponseType::new(t.to_string());
+        if t.eq("id_token") {
+            response_mode = "form_post";
+            auth_req = auth_req.add_extra_param("nonce", "1234234233232322222")
+        }
+    }
+    auth_req = auth_req.add_extra_param("response_mode", response_mode);
+    auth_req = auth_req.set_response_type(&response_type);
+    let (auth_url, csrf_token) = auth_req.url();
 
     debug!("csrf_token = {}", csrf_token.secret());
     store
@@ -535,8 +691,9 @@ async fn get_login(headers: HeaderMap, store: Store) -> Result<impl Reply, Rejec
     debug!("Url : {}", auth_url.clone());
 
     let result = Uri::from_str(auth_url.as_str());
-    Ok(warp::redirect(result.unwrap()))
-    //Ok(warp::reply::with_status("",StatusCode::OK))
+
+    let reply = warp::redirect(result.unwrap());
+    Ok(disable_cache(reply))
 }
 //
 //  return_error
@@ -590,9 +747,22 @@ async fn main() {
 
     let login_page = warp::get()
         .and(warp::path::path("login"))
+        .and(warp::query::query::<HashMap<String, String>>())
         .and(warp::header::headers_cloned())
         .and(store_filter.clone())
         .and_then(get_login);
+
+    let post_token_id_callback_page = warp::post()
+        .and(warp::path::path("callback"))
+        .and(warp::body::form::<HashMap<String, String>>())
+        .and(warp_sessions::request::with_session(
+            session_store.clone(),
+            None,
+        ))
+        .and(warp::path::end())
+        .and(warp::header::headers_cloned())
+        .and(store_filter.clone())
+        .and_then(post_callback_token_id);
 
     let callback_page = warp::get() //warp::path::path("callback")
         .and(warp::path::path("callback"))
@@ -610,6 +780,7 @@ async fn main() {
 
     let profile_page = warp::get()
         .and(warp::path::path("profile"))
+        .and(warp::query::query::<HashMap<String, String>>())
         .and(warp::path::end())
         .and(warp_sessions::request::with_session(
             session_store.clone(),
@@ -635,6 +806,7 @@ async fn main() {
 
     let routes = index_page
         .or(login_page)
+        .or(post_token_id_callback_page)
         .or(callback_page)
         .or(profile_page)
         .or(logout_page)
