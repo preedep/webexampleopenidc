@@ -1,14 +1,12 @@
 use jsonwebtoken::{decode, Algorithm, DecodingKey, Validation};
 use log::{debug, error, info};
-use oauth2::basic::{BasicClient, BasicTokenResponse};
+use oauth2::basic::{BasicClient};
 use oauth2::reqwest::async_http_client;
 use oauth2::{
     AuthUrl, AuthorizationCode, ClientId, ClientSecret, CsrfToken, PkceCodeChallenge,
     PkceCodeVerifier, RedirectUrl, ResponseType, Scope, TokenResponse, TokenUrl,
 };
-use reqwest::{Error, Response};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use std::collections::HashMap;
 use std::env;
 use std::str::FromStr;
@@ -474,7 +472,7 @@ async fn post_callback_token_id(
     forms: HashMap<String, String>,
     mut session_with_store: SessionWithStore<MemoryStore>,
     headers: HeaderMap,
-    store: Store,
+    _store: Store,
 ) -> Result<impl Reply, Rejection> {
     debug!("Callback page , Header > {:#?}", headers);
     debug!("Form value : {:#?}", forms);
