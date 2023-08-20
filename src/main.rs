@@ -96,47 +96,47 @@ pub struct XmsSt {
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct JwtPayloadIDToken {
-    pub aud: String,
-    pub iss: String,
-    pub iat: i64,
-    pub nbf: i64,
-    pub exp: i64,
-    pub acct: i64,
-    pub acrs: Vec<String>,
-    pub aio: String,
+    pub aud: Option<String>,
+    pub iss: Option<String>,
+    pub iat: Option<i64>,
+    pub nbf: Option<i64>,
+    pub exp: Option<i64>,
+    pub acct: Option<i64>,
+    pub acrs: Option<Vec<String>>,
+    pub aio: Option<String>,
     #[serde(rename = "auth_time")]
-    pub auth_time: i64,
-    pub ctry: String,
-    pub email: String,
+    pub auth_time: Option<i64>,
+    pub ctry: Option<String>,
+    pub email: Option<String>,
     #[serde(rename = "family_name")]
-    pub family_name: String,
+    pub family_name: Option<String>,
     #[serde(rename = "given_name")]
-    pub given_name: String,
-    pub idp: String,
-    pub ipaddr: String,
+    pub given_name: Option<String>,
+    pub idp: Option<String>,
+    pub ipaddr: Option<String>,
     #[serde(rename = "login_hint")]
-    pub login_hint: String,
-    pub name: String,
-    pub nonce: String,
-    pub oid: String,
+    pub login_hint: Option<String>,
+    pub name: Option<String>,
+    pub nonce: Option<String>,
+    pub oid: Option<String>,
     #[serde(rename = "preferred_username")]
-    pub preferred_username: String,
-    pub rh: String,
-    pub sid: String,
-    pub sub: String,
+    pub preferred_username: Option<String>,
+    pub rh: Option<String>,
+    pub sid: Option<String>,
+    pub sub: Option<String>,
     #[serde(rename = "tenant_ctry")]
-    pub tenant_ctry: String,
+    pub tenant_ctry: Option<String>,
     #[serde(rename = "tenant_region_scope")]
-    pub tenant_region_scope: String,
-    pub tid: String,
-    pub uti: String,
-    pub ver: String,
+    pub tenant_region_scope: Option<String>,
+    pub tid: Option<String>,
+    pub uti: Option<String>,
+    pub ver: Option<String>,
     #[serde(rename = "xms_pl")]
-    pub xms_pl: String,
+    pub xms_pl: Option<String>,
     #[serde(rename = "xms_tpl")]
-    pub xms_tpl: String,
-    pub department: String,
-    pub companyname: String,
+    pub xms_tpl: Option<String>,
+    pub department: Option<String>,
+    pub companyname: Option<String>,
 }
 
 
@@ -439,10 +439,10 @@ async fn get_profile(
                                 Company : {}
                                 <br/>
                                 "#,
-                                payload.claims.given_name,
-                                payload.claims.family_name,
-                                payload.claims.department,
-                                payload.claims.companyname).as_str()
+                                payload.claims.given_name.unwrap_or("".to_string()),
+                                payload.claims.family_name.unwrap_or("".to_string()),
+                                payload.claims.department.unwrap_or("".to_string()),
+                                payload.claims.companyname.unwrap_or("".to_string())).as_str()
                             );
                         }
                         Err(e) => {
@@ -456,6 +456,9 @@ async fn get_profile(
     <h1>
     Welcome <br/> {}
     </h1>
+    <br/>
+    <br/>
+     <a href="/logout">Logout</a>
     </body>
     "#,text_display);
 
