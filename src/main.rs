@@ -18,10 +18,11 @@ use warp::{Filter, Rejection, Reply};
 use warp_sessions::{MemoryStore, SessionWithStore};
 
 static WEB_AAD_URL: &str = "https://login.microsoftonline.com/";
+
 static WEB_AAD_AUTH: &str = "/oauth2/v2.0/authorize";
 static WEB_AAD_TOKEN: &str = "/oauth2/v2.0/token";
-static WEB_AAD_LOGOUT: &str =
-    "https://login.microsoftonline.com/common/oauth2/v2.0/logout?post_logout_redirect_uri=";
+static WEB_AAD_LOGOUT: &str = "/oauth2/v2.0/logout";
+
 
 
 
@@ -239,6 +240,7 @@ fn get_aad_url(aad_host: String,ten_nant_id: String,oauth2_path: String) -> Stri
 //
 async fn get_logout(
     params: HashMap<String, String>,
+    session_with_store: SessionWithStore<MemoryStore>,
     headers: HeaderMap,
     store: Store,
 ) -> Result<impl Reply, Rejection> {
@@ -246,10 +248,21 @@ async fn get_logout(
         "Logout Page , Header > {:#?} \r\n Query string > {:#?}",
         headers, params
     );
+    if !session_with_store.to_owned().session.is_destroyed() {
+        info!("destroy session ");
+        session_with_store.to_owned().session.destroy();
+    }
+
+
+
     let conf = store.grocery_list.read().await;
+    let aad_logout = get_aad_url(WEB_AAD_URL.to_string(),
+    conf.to_owned().tenant_id,
+    WEB_AAD_LOGOUT.to_string());
+
     let sign_out_url = format!(
-        "{}{}",
-        WEB_AAD_LOGOUT,
+        "{}?post_logout_redirect_uri={}",
+        aad_logout,
         urlencoding::encode(conf.clone().default_page.as_str())
     );
     debug!("redirect to url > {}", sign_out_url);
@@ -324,23 +337,23 @@ async fn get_profile(
                                 info!("Issuer from OpenID Configuration {} ,\r\n Issuer from JWT Payload {}",o.to_owned()
                                     .issuer,payload.to_owned().claims.iss);
 
+                                let jwks = reqwest::get(o.jwks_uri).await.unwrap().json::<JWKS>().await;
+                                match jwks {
+                                    Ok(j) => {
+                                        debug!("JWKS : {:#?}", j);
+                                    }
+                                    Err(e) => {
+                                        error!("Get JWKS URL error : {}", e);
+                                    }
+                                }
+
+                                /*
                                 if o.to_owned()
                                     .issuer
                                     .eq(payload.to_owned().claims.iss.as_str())
                                 {
                                     info!("Issuer same token[iss]   {}",payload.to_owned().claims.iss);
-                                    /*
-                                    let jwks = reqwest::get(o.jwks_uri).await.unwrap().json::<JWKS>().await;
-                                    match jwks {
-                                        Ok(j) => {
-                                            debug!("JWKS : {:#?}", j);
-                                        }
-                                        Err(e) => {
-                                            error!("Get JWKS URL error : {}", e);
-                                        }
-                                    }
-                                  */
-                                }
+                                }*/
                             } else {
                                 error!("Issuer is not collect");
                             }
@@ -354,25 +367,6 @@ async fn get_profile(
                     error!("Decode without validation  > {}", e);
                 }
             }
-            /*
-            let f = File::open("./key.pem").unwrap();
-            let mut reader = BufReader::new(f);
-            let mut buffer = Vec::new();
-            // Read file into vector.
-            reader.read_to_end(&mut buffer).unwrap();
-            let token = decode::<JwtPayload>(t.access_token().secret(),
-                                                          &DecodingKey::from_rsa_pem(buffer.as_slice()).unwrap(),
-                                                          &Validation::new(Algorithm::RS256));
-            match token {
-                Ok(r) => {
-
-                }
-                Err(e) => {
-                    error!("Decode jwt error {}",e);
-                }
-            }
-            */
-
             let body = r#"
     <body>
     <h1>
@@ -473,12 +467,29 @@ async fn get_callback(
         }
     }
 }
+
+
 //
 //  index , main page
 //
 //
 async fn index(headers: HeaderMap, store: Store) -> Result<impl Reply, Rejection> {
     debug!("Index Page , Header > {:#?}", headers);
+    let body = r#"
+        <html>
+            <body>
+                <a href="/login">Login with Azure AD</a>
+                <a href="/logout">Logout</a>
+            </body>
+    </html>
+    "#;
+    Ok(warp::reply::html(body))
+}
+//
+//  login page
+//
+async fn get_login(headers: HeaderMap, store: Store) -> Result<impl Reply, Rejection> {
+    debug!("Login page , Header > {:#?}", headers);
 
     let (pkce_challenge, pkce_verifier) = PkceCodeChallenge::new_random_sha256();
     debug!("PKCE : {:?},{:?}", pkce_challenge, pkce_verifier);
@@ -577,6 +588,12 @@ async fn main() {
         .and(store_filter.clone())
         .and_then(index);
 
+    let login_page = warp::get()
+        .and(warp::path::path("login"))
+        .and(warp::header::headers_cloned())
+        .and(store_filter.clone())
+        .and_then(get_login);
+
     let callback_page = warp::get() //warp::path::path("callback")
         .and(warp::path::path("callback"))
         .and(warp::query::query::<HashMap<String, String>>())
@@ -605,6 +622,10 @@ async fn main() {
     let logout_page = warp::get()
         .and(warp::path::path("logout"))
         .and(warp::query::query::<HashMap<String, String>>())
+        .and(warp_sessions::request::with_session(
+            session_store.clone(),
+            None,
+        ))
         .and(warp::path::end())
         .and(warp::header::headers_cloned())
         .and(store_filter.clone())
@@ -613,6 +634,7 @@ async fn main() {
     let log = warp::log("webexample003");
 
     let routes = index_page
+        .or(login_page)
         .or(callback_page)
         .or(profile_page)
         .or(logout_page)
