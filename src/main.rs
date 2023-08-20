@@ -1,26 +1,30 @@
-use base64::Engine;
+use jsonwebtoken::{decode, Algorithm, DecodingKey, Validation};
 use log::{debug, error, info};
 use oauth2::basic::{BasicClient, BasicTokenResponse};
 use oauth2::reqwest::async_http_client;
 use oauth2::{
-    AuthType, AuthUrl, AuthorizationCode, ClientId, ClientSecret, CsrfToken, PkceCodeChallenge,
+     AuthUrl, AuthorizationCode, ClientId, ClientSecret, CsrfToken, PkceCodeChallenge,
     PkceCodeVerifier, RedirectUrl, Scope, TokenResponse, TokenUrl,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap};
+use std::collections::HashMap;
 use std::env;
-use std::io::{Read};
 use std::str::FromStr;
 use std::sync::Arc;
-use jsonwebtoken::{Algorithm, decode, DecodingKey, Validation};
 use tokio::sync::RwLock;
 use warp::http::{HeaderMap, StatusCode, Uri};
 use warp::reject::Reject;
 use warp::{Filter, Rejection, Reply};
 use warp_sessions::{MemoryStore, SessionWithStore};
 
+static WEB_AAD_URL: &str = "https://login.microsoftonline.com/";
+static WEB_AAD_AUTH: &str = "/oauth2/v2.0/authorize";
+static WEB_AAD_TOKEN: &str = "/oauth2/v2.0/token";
 static WEB_AAD_LOGOUT: &str =
     "https://login.microsoftonline.com/common/oauth2/v2.0/logout?post_logout_redirect_uri=";
+
+
+
 
 static SESSION_KEY_ACCESS_TOKEN: &str = "access_token";
 
@@ -31,7 +35,6 @@ impl Reject for CallbackInvalid {}
 #[derive(Debug)]
 struct AccessTokenInvalid;
 impl Reject for AccessTokenInvalid {}
-
 
 ///
 ///     JWT Payload
@@ -94,7 +97,7 @@ pub struct XmsSt {
 ///
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct OpenIDConfiguration {
+pub struct OpenIDConfigurationV2 {
     #[serde(rename = "token_endpoint")]
     pub token_endpoint: String,
     #[serde(rename = "token_endpoint_auth_methods_supported")]
@@ -112,8 +115,10 @@ pub struct OpenIDConfiguration {
     #[serde(rename = "scopes_supported")]
     pub scopes_supported: Vec<String>,
     pub issuer: String,
-    #[serde(rename = "microsoft_multi_refresh_token")]
-    pub microsoft_multi_refresh_token: bool,
+    #[serde(rename = "request_uri_parameter_supported")]
+    pub request_uri_parameter_supported: bool,
+    #[serde(rename = "userinfo_endpoint")]
+    pub userinfo_endpoint: String,
     #[serde(rename = "authorization_endpoint")]
     pub authorization_endpoint: String,
     #[serde(rename = "device_authorization_endpoint")]
@@ -126,10 +131,6 @@ pub struct OpenIDConfiguration {
     pub end_session_endpoint: String,
     #[serde(rename = "claims_supported")]
     pub claims_supported: Vec<String>,
-    #[serde(rename = "check_session_iframe")]
-    pub check_session_iframe: String,
-    #[serde(rename = "userinfo_endpoint")]
-    pub userinfo_endpoint: String,
     #[serde(rename = "kerberos_endpoint")]
     pub kerberos_endpoint: String,
     #[serde(rename = "tenant_region_scope")]
@@ -164,7 +165,6 @@ pub struct Key {
     pub e: String,
     pub x5c: Vec<String>,
 }
-
 
 ///
 ///   Configuration object
@@ -228,6 +228,11 @@ impl Store {
         }
     }
 }
+fn get_aad_url(aad_host: String,tenent_id: String,oauth2_path: String) -> String {
+    let url = format!("{}{}{}",aad_host,tenent_id,oauth2_path);
+    info!("Called aad url > {}",url.to_owned());
+    url
+}
 //
 //  get_logout
 //
@@ -281,52 +286,72 @@ async fn get_profile(
             let mut validation = Validation::new(Algorithm::HS256);
             validation.insecure_disable_signature_validation();
 
-            let data  = decode::<JwtPayload>(t.access_token().secret(), &key, &validation);
+            let data = decode::<JwtPayload>(t.access_token().secret(), &key, &validation);
             match data {
                 Ok(payload) => {
-                    info!("jwt : {:#?}",&payload);
-                    //  check tenant id
-                    if payload.to_owned().claims.tid.eq(conf.to_owned().tenant_id.as_str()) {
-                        let url_openid_config =
-                            format!("https://login.microsoftonline.com/{}/.well-known/openid-configuration?appid={}",
+                    info!("jwt : {:#?}", &payload);
+                    let url_openid_config =
+                            format!("https://login.microsoftonline.com/{}/v2.0/.well-known/openid-configuration?appid={}",
                                     payload.to_owned().claims.tid,
                             payload.to_owned().claims.appid);
-                        info!("url validation : {}",url_openid_config);
+                    info!("url validation : {}", url_openid_config);
+                    /*
+                    var issuer = metadata["kid"].issuer;
+                    if (issuer.contains("{tenantId}", CaseInvariant)) issuer = issuer.Replace("{tenantid}", token["tid"], CaseInvariant);
+                    if (issuer != token["iss"]) throw validationException;
+                    if (configuration.allowedIssuer != "*" && configuration.allowedIssuer != issuer) throw validationException;
+                    var issUri = new Uri(token["iss"]);
+                    if (issUri.Segments.Count < 1) throw validationException;
+                    if (issUri.Segments[1] != token["tid"]) throw validationException;
+                    */
+                    //let resp = reqwest::get(url_openid_config).unwrap().json::<OpenIDConfiguration>();
+                    let t = reqwest::get(url_openid_config)
+                        .await
+                        .unwrap()
+                        .json::<OpenIDConfigurationV2>()
+                        .await;
+                    match t {
+                        Ok(o) => {
+                            debug!("Open ID Configuration : {:#?}", o);
+                            // verify issuer
+                            if o.to_owned()
+                                .issuer
+                                .as_str()
+                                .contains(conf.to_owned().tenant_id.as_str())
+                            {
+                                info!("Issuer is collect");
 
-                        //let resp = reqwest::get(url_openid_config).unwrap().json::<OpenIDConfiguration>();
-                        let t = reqwest::get(url_openid_config).await.unwrap().json::<OpenIDConfiguration>().await;
-                        match t {
-                            Ok(o) => {
-                                debug!("Open ID Configuration : {:#?}",o);
-                                let jwks = reqwest::get(o.jwks_uri).await.unwrap().json::<JWKS>().await;
-                                match jwks {
-                                    Ok(j) => {
-                                        debug!("JWKS : {:#?}",j);
-                                        /*
-                                        var issuer = metadata["kid"].issuer;
-                                        if (issuer.contains("{tenantId}", CaseInvariant)) issuer = issuer.Replace("{tenantid}", token["tid"], CaseInvariant);
-                                        if (issuer != token["iss"]) throw validationException;
-                                        if (configuration.allowedIssuer != "*" && configuration.allowedIssuer != issuer) throw validationException;
-                                        var issUri = new Uri(token["iss"]);
-                                        if (issUri.Segments.Count < 1) throw validationException;
-                                        if (issUri.Segments[1] != token["tid"]) throw validationException;
-                                        */
+                                info!("Issuer from OpenID Configuration {} ,\r\n Issuer from JWT Payload {}",o.to_owned()
+                                    .issuer,payload.to_owned().claims.iss);
+
+                                if o.to_owned()
+                                    .issuer
+                                    .eq(payload.to_owned().claims.iss.as_str())
+                                {
+                                    info!("Issuer same token[iss]   {}",payload.to_owned().claims.iss);
+                                    /*
+                                    let jwks = reqwest::get(o.jwks_uri).await.unwrap().json::<JWKS>().await;
+                                    match jwks {
+                                        Ok(j) => {
+                                            debug!("JWKS : {:#?}", j);
+                                        }
+                                        Err(e) => {
+                                            error!("Get JWKS URL error : {}", e);
+                                        }
                                     }
-                                    Err(e) => {
-                                        error!("Get JWKS URL error : {}",e);
-                                    }
+                                  */
                                 }
-                            }
-                            Err(e) => {
-                                error!("Get open id config error {}",e);
+                            } else {
+                                error!("Issuer is not collect");
                             }
                         }
-                    }else{
-                        error!("TenantID incorrect");
+                        Err(e) => {
+                            error!("Get open id config error {}", e);
+                        }
                     }
                 }
                 Err(e) => {
-                    error!("Decode without validation  > {}",e);
+                    error!("Decode without validation  > {}", e);
                 }
             }
             /*
@@ -377,34 +402,32 @@ async fn get_callback(
     match params.get("code") {
         None => Err(warp::reject::custom(CallbackInvalid)),
         Some(c) => {
+            info!("get auth code complete");
             let conf = store.grocery_list.read().await;
-
             let client = BasicClient::new(
                 ClientId::new(conf.clone().client_id),
                 Some(ClientSecret::new(conf.clone().client_secret)),
                 AuthUrl::new(
-                    format!(
-                        "https://login.microsoftonline.com/{}/oauth2/v2.0/authorize",
-                        conf.clone().tenant_id
-                    )
-                    .to_string(),
+                    get_aad_url(WEB_AAD_URL.to_string(),
+                    conf.to_owned().tenant_id,
+                        WEB_AAD_AUTH.to_string(),
+                    ),
                 )
                 .unwrap(),
                 Some(
                     TokenUrl::new(
-                        format!(
-                            "https://login.microsoftonline.com/{}/oauth2/v2.0/token",
-                            conf.clone().tenant_id
+                        get_aad_url(WEB_AAD_URL.to_string(),
+                                    conf.to_owned().tenant_id,
+                                    WEB_AAD_TOKEN.to_string(),
                         )
-                        .to_string(),
+                        ,
                     )
                     .unwrap(),
                 ),
             )
-            .set_auth_type(AuthType::RequestBody)
+            //.set_auth_type(AuthType::RequestBody)
             .set_redirect_uri(RedirectUrl::new(conf.clone().redirect_uri).unwrap());
             let verifier = store.pkce_table.read().await;
-
             let verifier = verifier.get(params.get("state").unwrap());
             return match verifier {
                 None => Err(warp::reject::custom(CallbackInvalid)),
@@ -463,13 +486,12 @@ async fn index(headers: HeaderMap, store: Store) -> Result<impl Reply, Rejection
     let conf = store.grocery_list.read().await;
     let client = BasicClient::new(
         ClientId::new(conf.clone().client_id),
-        Some(ClientSecret::new(conf.clone().client_secret)),
+        Some(ClientSecret::new(conf.to_owned().client_secret)),
         AuthUrl::new(
-            format!(
-                "https://login.microsoftonline.com/{}/oauth2/v2.0/authorize",
-                conf.clone().tenant_id
-            )
-            .to_string(),
+            get_aad_url(WEB_AAD_URL.to_string(),
+                conf.to_owned().tenant_id,
+                WEB_AAD_AUTH.to_string(),
+            ),
         )
         .unwrap(),
         None,

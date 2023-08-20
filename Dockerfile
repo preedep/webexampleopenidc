@@ -22,8 +22,8 @@ RUN cargo build --release
 FROM alpine:3.17 AS runtime
 RUN addgroup -S myuser && adduser -S myuser -G myuser
 WORKDIR app
-COPY --from=builder /app/target/release/webexample003 /usr/local/bin
+COPY --from=builder /app/target/release/webexampleopenidc /usr/local/bin
 EXPOSE 8080
 USER myuser
-CMD ["/usr/local/bin/webexample003"]
+CMD ["/usr/local/bin/webexampleopenidc"]
 
