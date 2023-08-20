@@ -228,8 +228,8 @@ impl Store {
         }
     }
 }
-fn get_aad_url(aad_host: String,tenent_id: String,oauth2_path: String) -> String {
-    let url = format!("{}{}{}",aad_host,tenent_id,oauth2_path);
+fn get_aad_url(aad_host: String,ten_nant_id: String,oauth2_path: String) -> String {
+    let url = format!("{}{}{}",aad_host,ten_nant_id,oauth2_path);
     info!("Called aad url > {}",url.to_owned());
     url
 }
