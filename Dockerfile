@@ -1,7 +1,7 @@
 ################
 ##### Builder
 FROM rust:1.71.1-alpine3.17 as chef
-RUN apk add --no-cache musl-dev gcc
+RUN apk add --no-cache musl-dev gcc openssl-dev
 RUN cargo install cargo-chef
 WORKDIR app
 
@@ -20,6 +20,7 @@ RUN cargo build --release
 ################
 ##### Runtime
 FROM alpine:3.17 AS runtime
+RUN apk add openssl-dev
 RUN addgroup -S myuser && adduser -S myuser -G myuser
 WORKDIR app
 COPY --from=builder /app/target/release/webexampleopenidc /usr/local/bin
