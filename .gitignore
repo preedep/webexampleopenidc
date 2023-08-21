@@ -8,5 +8,8 @@ run.sh.bkk
 /.idea/kubernetes-settings.xml
 certificate.pem
 key.pem
+src/key.pem
 .DS_Store
+key.der
+pkcs8.pem
 

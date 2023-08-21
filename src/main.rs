@@ -1,4 +1,4 @@
-use jsonwebtoken::{decode, Algorithm, DecodingKey, Validation};
+use jsonwebtoken::{decode, Algorithm, DecodingKey, Validation, decode_header};
 use log::{debug, error, info};
 use oauth2::basic::{BasicClient};
 use oauth2::reqwest::async_http_client;
@@ -9,6 +9,8 @@ use oauth2::{
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::env;
+use std::fs::File;
+use std::io::Read;
 use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -24,6 +26,7 @@ static WEB_AAD_TOKEN: &str = "/oauth2/v2.0/token";
 static WEB_AAD_LOGOUT: &str = "/oauth2/v2.0/logout";
 
 static SESSION_KEY_ACCESS_TOKEN: &str = "access_token";
+static SESSION_STATE: &str = "state";
 
 #[derive(Debug)]
 struct CallbackInvalid;
@@ -329,12 +332,12 @@ async fn get_logout(
 //
 //
 async fn get_profile(
-    querys: HashMap<String, String>,
+    query: HashMap<String, String>,
     session_with_store: SessionWithStore<MemoryStore>,
     headers: HeaderMap,
     store: Store,
 ) -> Result<impl Reply, Rejection> {
-    debug!("Profile Page , Header > {:#?} \r\n", headers,);
+    debug!("\r\n=====\r\nProfile Page , Header > {:#?} \r\n", headers,);
     debug!("Session > {:#?}", session_with_store.session);
     let mut text_display = String::new();
     let conf = store.grocery_list.read().await;
@@ -349,13 +352,13 @@ async fn get_profile(
         Some(t) => {
             let access_token = t;
             debug!("have access token : {}", access_token);
-            let key = DecodingKey::from_secret(&[]);
-            let mut validation = Validation::new(Algorithm::HS256);
-            validation.insecure_disable_signature_validation();
-            let response_type = querys.get("response_type");
+            let response_type = query.get("response_type");
             if let Some(res) = response_type {
                 if res.eq("code") {
                     // code
+                    let key = DecodingKey::from_secret(&[]);
+                    let mut validation = Validation::new(Algorithm::HS256);
+                    validation.insecure_disable_signature_validation();
                     let data = decode::<JwtPayload>(access_token.as_str(), &key, &validation);
                     match data {
                         Ok(payload) => {
@@ -380,9 +383,10 @@ async fn get_profile(
                                         .contains(conf.to_owned().tenant_id.as_str())
                                     {
                                         info!("Issuer is collect");
-                                        info!("Issuer from OpenID Configuration {} ,\r\n Issuer from JWT Payload {}",o.to_owned()
-                                    .issuer,payload.to_owned().claims.iss);
-
+                                        info!("Issuer from OpenID Configuration {} ,\r\n Issuer from JWT Payload {}"
+                                            ,o.to_owned()
+                                            .issuer,payload.to_owned().claims.iss
+                                        );
                                         let jwks = reqwest::get(o.to_owned().jwks_uri)
                                             .await
                                             .unwrap()
@@ -428,7 +432,21 @@ async fn get_profile(
                     }
                 } else {
                     // ID Token
-                    let data = decode::<JwtPayloadIDToken>(access_token.as_str(), &key, &validation);
+                    let header = decode_header(&access_token.as_str()).unwrap();
+                    debug!("JWT Header : \r\n{:#?}", header);
+
+                    let state = session_with_store
+                        .session
+                        .get::<String>(SESSION_STATE).unwrap_or("".to_string());
+                    debug!("State : {}",state);
+
+                    let pem_bytes = include_bytes!("key.pem");
+                    debug!("\r\n{}", String::from_utf8_lossy(pem_bytes));
+                    let key = DecodingKey::from_rsa_pem(pem_bytes);
+                    let validation = Validation::new(Algorithm::RS256);
+                    let data = decode::<JwtPayloadIDToken>(access_token.as_str(),
+                                                           &key.unwrap(),
+                                                           &validation);
                     match data {
                         Ok(payload) => {
                             text_display.push_str(
@@ -446,7 +464,7 @@ async fn get_profile(
                             );
                         }
                         Err(e) => {
-                            error!("Decode without validation  > {}", e);
+                            error!("Decode validation  > {}", e);
                         }
                     }
                 }
@@ -477,7 +495,7 @@ async fn post_callback_token_id(
     headers: HeaderMap,
     _store: Store,
 ) -> Result<impl Reply, Rejection> {
-    debug!("Callback page , Header > {:#?}", headers);
+    debug!("\r\n======\r\nCallback page , Header > {:#?}", headers);
     debug!("Form value : {:#?}", forms);
 
     return match forms.get("id_token") {
@@ -491,6 +509,10 @@ async fn post_callback_token_id(
                 .await
                 .insert(SESSION_KEY_ACCESS_TOKEN, token)
                 .unwrap();
+
+            let _res = shared_session.write()
+                .await.insert(SESSION_STATE,forms.get("state")).unwrap();
+
 
             session_with_store.session = Arc::try_unwrap(shared_session).unwrap().into_inner();
             debug!("Session > {:#?}", session_with_store.session);
@@ -518,9 +540,15 @@ async fn get_callback(
     store: Store,
 ) -> Result<impl Reply, Rejection> {
     debug!(
-        "Callback Page , Header > {:#?} \r\n Query string > {:#?}",
-        headers, params
+        "\r\n=======\r\nCallback Page , Header > {:#?} \r\n \
+        Query string > {:#?}",
+        headers,
+        params
     );
+    debug!("Session > {:#?}",
+        session_with_store.to_owned().session);
+
+
     match params.get("code") {
         None => Err(warp::reject::custom(CallbackInvalid)),
         Some(c) => {
@@ -546,8 +574,17 @@ async fn get_callback(
             )
             //.set_auth_type(AuthType::RequestBody)
             .set_redirect_uri(RedirectUrl::new(conf.clone().redirect_uri).unwrap());
+
+            /*
             let verifier = store.pkce_table.read().await;
             let verifier = verifier.get(params.get("state").unwrap());
+            */
+            let shared_session = Arc::new(RwLock::new(session_with_store.to_owned().session));
+            let verifier = shared_session
+                .read()
+                .await
+                .get::<PkceCodeVerifier>(params.get("state").unwrap());
+
             return match verifier {
                 None => Err(warp::reject::custom(CallbackInvalid)),
                 Some(v) => {
@@ -563,7 +600,7 @@ async fn get_callback(
                             info!("Access token : {}", t.access_token().secret());
                             let result = Uri::from_str("/profile?response_type=code");
                             // save access token to session
-                            let shared_session = Arc::new(RwLock::new(session_with_store.session));
+                            let shared_session = Arc::new(RwLock::new(session_with_store.to_owned().session));
                             let _res = shared_session
                                 .write()
                                 .await
@@ -572,8 +609,6 @@ async fn get_callback(
 
                             session_with_store.session =
                                 Arc::try_unwrap(shared_session).unwrap().into_inner();
-                            debug!("Session > {:#?}", session_with_store.session);
-
                             //redirect
                             let res = warp_sessions::reply::with_session(
                                 warp::redirect::redirect(result.unwrap()),
@@ -594,37 +629,20 @@ async fn get_callback(
 }
 
 //
-//  index , main page
-//
-//
-async fn index(headers: HeaderMap, _store: Store) -> Result<impl Reply, Rejection> {
-    debug!("Index Page , Header > {:#?}", headers);
-    let body = r#"
-        <html>
-            <body>
-                <a href="/login?response_type=code">Login with Azure AD (Auth Code )</a><br/>
-                  <a href="/login?response_type=id_token">Login with Azure AD (ID Token - OpenIDC)</a><br/>
-                <a href="/logout">Logout</a>
-            </body>
-    </html>
-    "#;
-    let reply = warp::reply::html(body);
-    Ok(disable_cache(reply))
-}
-
-//
 //  login page
 //  for response_type = code
 //
 async fn get_login(
-    querys: HashMap<String, String>,
+    query: HashMap<String, String>,
+    mut session_with_store: SessionWithStore<MemoryStore>,
     headers: HeaderMap,
     store: Store,
 ) -> Result<impl Reply, Rejection> {
-    debug!("Login page , Header > {:#?}", headers);
+    debug!("\r\n=====\r\nLogin page , Header > {:#?}", headers);
 
     let (pkce_challenge, pkce_verifier) = PkceCodeChallenge::new_random_sha256();
-    debug!("PKCE : {:?},{:?}", pkce_challenge, pkce_verifier);
+    debug!("PKCE challenge : {:?} \r\n ,\
+            PKCE verifier {:?}", pkce_challenge, pkce_verifier);
 
     let conf = store.grocery_list.read().await;
     let client = BasicClient::new(
@@ -643,22 +661,6 @@ async fn get_login(
     //response-type = id_token is openid scenario
 
     // Generate the full authorization URL.
-    /*
-    let (auth_url, csrf_token) = client
-        .authorize_url(CsrfToken::new_random)
-        // Set the desired scopes.
-        .add_scope(Scope::new("openid".to_string()))
-        .add_scope(Scope::new("profile".to_string()))
-        .add_scope(Scope::new("email".to_string()))
-        .add_scope(Scope::new("User.Read".to_string()))
-        .set_pkce_challenge(pkce_challenge)
-        .add_extra_param("response_mode", response_mode)
-        .add_extra_param("nonce","1234234233232322222")
-        .set_response_type(&response_type)
-        .url();
-
-     */
-
     let mut auth_req = client
         .authorize_url(CsrfToken::new_random)
         // Set the desired scopes.
@@ -670,7 +672,7 @@ async fn get_login(
 
     let mut response_type = ResponseType::new("code".to_string());
     let mut response_mode = "query";
-    if let Some(t) = querys.get("response_type") {
+    if let Some(t) = query.get("response_type") {
         response_type = ResponseType::new(t.to_string());
         if t.eq("id_token") {
             response_mode = "form_post";
@@ -682,19 +684,31 @@ async fn get_login(
     let (auth_url, csrf_token) = auth_req.url();
 
     debug!("csrf_token = {}", csrf_token.secret());
+    /*
     store
         .pkce_table
         .write()
         .await
         .insert(csrf_token.secret().to_string(), pkce_verifier);
+*/
+    let shared_session = Arc::new(RwLock::new(session_with_store.clone().session));
+    let _res = shared_session
+        .write()
+        .await
+        .insert(csrf_token.secret().as_str(), pkce_verifier)
+        .unwrap();
 
     let auth_url = format!("{}", auth_url);
     debug!("Url : {}", auth_url.clone());
 
-    let result = Uri::from_str(auth_url.as_str());
+    debug!("Session value at login page > {:#?}",session_with_store.to_owned().session);
 
-    let reply = warp::redirect(result.unwrap());
-    Ok(disable_cache(reply))
+    let result = Uri::from_str(auth_url.as_str());
+    let reply = warp_sessions::reply::with_session(
+        warp::redirect(result.unwrap()),
+        session_with_store).await;
+    //Ok(disable_cache(reply))
+    Ok(reply.unwrap())
 }
 //
 //  return_error
@@ -719,6 +733,26 @@ async fn return_error(r: Rejection) -> Result<impl Reply, Rejection> {
         ))
     }
 }
+//
+//  index , main page
+//
+//
+async fn index(headers: HeaderMap, _store: Store) -> Result<impl Reply, Rejection> {
+    debug!("Index Page , Header > {:#?}", headers);
+    let body = r#"
+        <html>
+            <body>
+                <a href="/login?response_type=code">Login with Azure AD (Auth Code )</a><br/>
+                  <a href="/login?response_type=id_token">Login with Azure AD (ID Token - OpenIDC)</a><br/>
+                <a href="/logout">Logout</a>
+            </body>
+    </html>
+    "#;
+    let reply = warp::reply::html(body);
+    Ok(disable_cache(reply))
+}
+
+
 //
 //  main
 //
@@ -749,6 +783,11 @@ async fn main() {
     let login_page = warp::get()
         .and(warp::path::path("login"))
         .and(warp::query::query::<HashMap<String, String>>())
+        .and(warp_sessions::request::with_session(
+            session_store.clone(),
+            None,
+        ))
+        .and(warp::path::end())
         .and(warp::header::headers_cloned())
         .and(store_filter.clone())
         .and_then(get_login);
