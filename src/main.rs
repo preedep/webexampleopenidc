@@ -12,7 +12,6 @@ use std::env;
 use std::io::Read;
 use std::str::FromStr;
 use std::sync::Arc;
-use serde_json::Value;
 use tokio::sync::RwLock;
 use warp::http::{HeaderMap, HeaderValue, StatusCode, Uri};
 use warp::reject::Reject;
