@@ -12,6 +12,7 @@ use std::env;
 use std::io::Read;
 use std::str::FromStr;
 use std::sync::Arc;
+use serde_json::Value;
 use tokio::sync::RwLock;
 use warp::http::{HeaderMap, HeaderValue, StatusCode, Uri};
 use warp::reject::Reject;
@@ -216,6 +217,18 @@ pub struct Key {
     pub x5c: Vec<String>,
 }
 
+#[derive(Debug,Deserialize,Serialize)]
+struct GraphMe {
+
+    #[serde(rename = "companyName")]
+    company_name : String,
+    #[serde(rename = "department")]
+    department : String,
+    #[serde(rename = "displayName")]
+    display_name: String,
+    #[serde(rename = "employeeId")]
+    employee_id: String
+}
 ///
 ///   Configuration object
 ///
@@ -399,21 +412,34 @@ async fn get_profile(
                                                 error!("Get JWKS URL error : {}", e);
                                             }
                                         }
+
+
                                         let client = reqwest::Client::new();
                                         let res_user_info = client
-                                            .get(o.to_owned().userinfo_endpoint)
+                                            .get("https://graph.microsoft.com/v1.0/me?$select=displayName,department,employeeId,companyName")
                                             .header(
                                                 "Authorization",
                                                 format!("Bearer {}", access_token),
-                                            )
+                                            ).header("Content-Type","application/json")
                                             .send()
                                             .await;
-                                        match res_user_info {
-                                            Ok(r) => {
-                                                debug!("Get user info : {:#?}", r);
+                                        let res_me = res_user_info.unwrap().json::<GraphMe>().await;
+                                        match res_me {
+                                            Ok(me) => {
+                                                debug!("Json response > {:#?}",me);
+                                                text_display.push_str(
+                                                    format!(r#"Name : {}
+                                                             <br/>
+                                                                 Department : {}
+                                                            <br/>
+                                                                 Company : {}
+                                                             <br/>
+                                                             "#,
+                                                              me.display_name,  me.department, me.company_name,
+                                                    ).as_str());
                                             }
                                             Err(e) => {
-                                                error!("Get user info err : {}", e);
+                                                error!("Error > {}",e);
                                             }
                                         }
                                     } else {
@@ -578,7 +604,7 @@ async fn get_callback(
             let verifier = store.pkce_table.read().await;
             let verifier = verifier.get(params.get("state").unwrap());
             */
-            let shared_session = Arc::new(RwLock::new(session_with_store.to_owned().session));
+            let shared_session = Arc::new(RwLock::new(session_with_store.clone().session));
             let verifier = shared_session
                 .read()
                 .await
@@ -599,13 +625,13 @@ async fn get_callback(
                             info!("Access token : {}", t.access_token().secret());
                             let result = Uri::from_str("/profile?response_type=code");
                             // save access token to session
-                            let shared_session = Arc::new(RwLock::new(session_with_store.to_owned().session));
+                            let shared_session = Arc::new(RwLock::new(session_with_store.clone().session));
                             let _res = shared_session
                                 .write()
                                 .await
-                                .insert(SESSION_KEY_ACCESS_TOKEN, t.access_token().secret())
+                                .insert(SESSION_KEY_ACCESS_TOKEN,
+                                        t.access_token().secret())
                                 .unwrap();
-
                             session_with_store.session =
                                 Arc::try_unwrap(shared_session).unwrap().into_inner();
                             //redirect
