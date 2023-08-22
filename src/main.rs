@@ -464,12 +464,15 @@ async fn get_profile(
                         .get::<String>(SESSION_STATE).unwrap_or("".to_string());
                     debug!("State : {}",state);
 
-                    let pem_bytes = include_bytes!("key.pem");
-                    debug!("\r\n{}", String::from_utf8_lossy(pem_bytes));
-                    let key = DecodingKey::from_rsa_pem(pem_bytes);
-                    let validation = Validation::new(Algorithm::RS256);
+                    //let pem_bytes = include_bytes!("key.pem");
+                    //debug!("\r\n{}", String::from_utf8_lossy(pem_bytes));
+
+                    let key = DecodingKey::from_secret(&[]);
+                    //let key = DecodingKey::from_rsa_pem(pem_bytes);
+                    let mut validation = Validation::new(Algorithm::RS256);
+                    validation.insecure_disable_signature_validation();
                     let data = decode::<JwtPayloadIDToken>(access_token.as_str(),
-                                                           &key.unwrap(),
+                                                           &key,
                                                            &validation);
                     match data {
                         Ok(payload) => {
@@ -766,8 +769,12 @@ async fn index(headers: HeaderMap, _store: Store) -> Result<impl Reply, Rejectio
     let body = r#"
         <html>
             <body>
-                <a href="/login?response_type=code">Login with Azure AD (Auth Code )</a><br/>
-                  <a href="/login?response_type=id_token">Login with Azure AD (ID Token - OpenIDC)</a><br/>
+                <h1>Test Azure AD</h1> <br/>
+
+                <a href="/login?response_type=code">Login with Azure AD (Auth Code )</a><br/><br/>
+
+                <a href="/login?response_type=id_token">Login with Azure AD (ID Token - OpenIDC)</a><br/><br/>
+
                 <a href="/logout">Logout</a>
             </body>
     </html>
