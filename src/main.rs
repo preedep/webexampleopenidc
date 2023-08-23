@@ -1,7 +1,7 @@
 use jsonwebtoken::{decode, Algorithm, DecodingKey, Validation, decode_header};
 use log::{debug, error, info};
 use oauth2::basic::{BasicClient};
-use oauth2::reqwest::async_http_client;
+use oauth2::reqwest::{async_http_client, http_client};
 use oauth2::{
     AuthUrl, AuthorizationCode, ClientId, ClientSecret, CsrfToken, PkceCodeChallenge,
     PkceCodeVerifier, RedirectUrl, ResponseType, Scope, TokenResponse, TokenUrl,
@@ -615,12 +615,15 @@ async fn get_callback(
             return match verifier {
                 None => Err(warp::reject::custom(CallbackInvalid)),
                 Some(v) => {
+
+                    info!("request access token ");
                     let token_result = client
                         .exchange_code(AuthorizationCode::new(c.to_string()))
                         .add_extra_param("code_verifier", v.secret())
+                        //.request(http_client);
                         .request_async(async_http_client)
                         .await;
-
+                    debug!("token result > {:#?}",token_result);
                     match token_result {
                         Ok(t) => {
                             info!("Basic Token Response : {:#?}", t);
@@ -769,7 +772,7 @@ async fn index(headers: HeaderMap, _store: Store) -> Result<impl Reply, Rejectio
     let body = r#"
         <html>
             <body>
-                <h1>Test Azure AD</h1> <br/>
+                <h1>Test Azure AD V2.1</h1> <br/>
 
                 <a href="/login?response_type=code">Login with Azure AD (Auth Code )</a><br/><br/>
 

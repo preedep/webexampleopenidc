@@ -21,6 +21,14 @@ RUN cargo build --release
 ##### Runtime
 FROM alpine:3.17 AS runtime
 RUN apk add openssl-dev
+
+RUN apk --no-cache add ca-certificates \
+    && rm -rf /var/cache/apk/*
+RUN openssl s_client -connect graph.microsoft.com:443 -showcerts </dev/null 2>/dev/null | sed -e '/-----BEGIN/,/-----END/!d' | tee "/etc/ssl/certs/ca-certificates.crt" >/dev/null && \
+update-ca-certificates
+
+RUN openssl s_client -connect login.microsoftonline.com:443 -showcerts </dev/null 2>/dev/null | sed -e '/-----BEGIN/,/-----END/!d' | tee "/etc/ssl/certs/ca-certificates.crt" >/dev/null && \
+update-ca-certificates
 RUN addgroup -S myuser && adduser -S myuser -G myuser
 WORKDIR app
 COPY --from=builder /app/target/release/webexampleopenidc /usr/local/bin
