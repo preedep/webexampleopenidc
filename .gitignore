@@ -1,5 +1,6 @@
 /target
 run.sh
+run_docker.sh
 run.sh.bkk
 /.idea/modules.xml
 /.idea/webexampleopenidc.iml
