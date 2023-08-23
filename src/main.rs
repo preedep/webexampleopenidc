@@ -1,7 +1,7 @@
 use jsonwebtoken::{decode, Algorithm, DecodingKey, Validation, decode_header};
 use log::{debug, error, info};
 use oauth2::basic::{BasicClient};
-use oauth2::reqwest::{async_http_client, http_client};
+use oauth2::reqwest::{async_http_client};
 use oauth2::{
     AuthUrl, AuthorizationCode, ClientId, ClientSecret, CsrfToken, PkceCodeChallenge,
     PkceCodeVerifier, RedirectUrl, ResponseType, Scope, TokenResponse, TokenUrl,
